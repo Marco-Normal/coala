@@ -1,0 +1,10 @@
+[package]
+name = "coala"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log = "0.4.28"
+miette = { version = "7.6.0", features = ["fancy"] }
+thiserror = "2.0.17"
+datetime = { path = "../datetime/" }
