@@ -1,1 +1,2 @@
-pub(crate) mod col_parser;
+pub mod col_parser;
+pub mod csv_parser;

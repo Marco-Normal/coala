@@ -32,179 +32,125 @@ impl CsvHandler {
 }
 
 #[derive(Debug)]
-struct CsvCol<T> {
+pub(crate) struct CsvCol<T> {
     col_name: String,
     values: Vec<T>,
     n_elements: usize,
 }
 #[derive(Debug)]
-enum CsvType {
+pub(crate) enum ColType {
     Float(CsvCol<f64>),
     Integer(CsvCol<i64>),
     String(CsvCol<String>),
     Datetime(CsvCol<Datetime>),
 }
 #[derive(Debug, Error, Diagnostic)]
-enum CsvParseError {
-    #[error("Error in collumn named `{col_name}`. Invalid data type, couldn't match with any.")]
-    InvalidColType { col_name: String },
+enum ColParseError {
+    #[error("Error in collumn named `{name}`. Invalid data type, couldn't match with any.")]
+    InvalidColType { name: String },
 }
 #[derive(Debug)]
-struct CsvConfig {
-    date_format: Option<String>,
-    as_date: bool,
+#[derive(Default)]
+pub(crate) struct ColConfig {
+    pub(crate) date_format: Option<String>,
+    pub(crate) as_date: bool,
 }
 
-impl Default for CsvConfig {
-    fn default() -> Self {
-        Self {
-            date_format: None,
-            as_date: false,
-        }
-    }
-}
 
-impl CsvType {
-    fn from_path(
-        path: &str,
-        col_number: usize,
-        separator: char,
-        config: Option<CsvConfig>,
+impl ColType {
+    pub(crate) fn from_values(
+        elements: &[String],
+        name: String,
+        config: Option<ColConfig>,
     ) -> Result<Self, Error> {
         if let Some(config) = config {
-            if let Some(col) = Self::as_date(path, col_number, separator, config) {
+            if let Some(col) = Self::as_date(elements, &name, config) {
                 let col = col?;
                 return Ok(Self::Datetime(col));
             }
         }
-        let col_name = CsvHandler::get_col_name(path, col_number, separator)?;
         macro_rules! try_type {
-            ($t:ty, $p:expr, $c:expr, $s:expr, $en:ident) => {
-                match CsvCol::<$t>::from_path($p, $c, $s) {
-                    Ok(col) => return Ok(CsvType::$en(col)),
+            ($t:ty, $p:expr,  $n:expr, $en:ident) => {
+                match CsvCol::<$t>::from_str_list($p, $n) {
+                    Ok(col) => return Ok(ColType::$en(col)),
                     Err(e) => info!(
                         "Column {} couldn't be parsed as type '{}'. Reason: {}",
-                        $c,
+                        &$n,
                         stringify!($t),
                         e
                     ),
                 }
             };
         }
-        try_type!(i64, path, col_number, separator, Integer);
-        try_type!(f64, path, col_number, separator, Float);
-        try_type!(String, path, col_number, separator, String);
-        Err(CsvParseError::InvalidColType { col_name }.into())
+        try_type!(i64, elements, &name, Integer);
+        try_type!(f64, elements, &name, Float);
+        try_type!(String, elements, &name, String);
+        Err(ColParseError::InvalidColType { name }.into())
     }
-    fn as_date(
-        path: &str,
-        col_number: usize,
-        separator: char,
-        config: CsvConfig,
+    pub(crate) fn as_date(
+        elements: &[String],
+        name: &str,
+        config: ColConfig,
     ) -> Option<Result<CsvCol<Datetime>, Error>> {
         match config {
-            CsvConfig {
+            ColConfig {
                 date_format,
                 as_date: true,
-            } => Some(CsvCol::as_datetime(
-                path,
-                col_number,
-                separator,
-                date_format.as_deref(),
-            )),
+            } => Some(CsvCol::as_datetime(elements, name, date_format.as_deref())),
             _ => None,
         }
     }
 }
 
 impl<T: FromStr> CsvCol<T> {
-    fn from_path(path: &str, col_number: usize, separator: char) -> Result<Self, Error> {
-        let csv = File::open(path).into_diagnostic()?;
-        let reader = BufReader::new(csv);
-        let mut lines = reader.lines();
+    fn from_str_list(elements: &[String], name: &str) -> Result<Self, Error> {
         let mut values: Vec<T> = Vec::new();
-        let name = match lines.next() {
-            Some(name) => {
-                let name = name.into_diagnostic()?;
-                let parts = name.split(separator).nth(col_number);
-                if let Some(parts) = parts {
-                    parts.to_string()
-                } else {
-                    String::from("Unnamed")
+        for line in elements {
+            let t = match line.parse::<T>() {
+                Ok(t) => t,
+                Err(_) => {
+                    return Err(miette!(
+                        "Error parsing value `{line}`. String couldn't be converted safely."
+                    ))
                 }
-            }
-            None => String::from("Unnamed"),
-        };
-        for line in lines {
-            if let Some(val) = line.into_diagnostic()?.split(separator).nth(col_number) {
-                let t = match val.parse::<T>() {
-                    Ok(t) => t,
-                    Err(_) => {
-                        return Err(miette!(
-                            "Error parsing value `{val}`. String couldn't be converted safely."
-                        ))
-                    }
-                };
-                values.push(t);
-            }
+            };
+            values.push(t);
         }
         Ok(Self {
-            col_name: name,
+            col_name: name.to_string(),
             n_elements: values.len(),
             values,
         })
     }
 }
 impl CsvCol<Datetime> {
-    fn as_datetime(
-        path: &str,
-        col_number: usize,
-        separator: char,
-        format: Option<&str>,
-    ) -> Result<CsvCol<Datetime>, Error> {
-        let csv = File::open(path).into_diagnostic()?;
-        let reader = BufReader::new(csv);
-        let mut lines = reader.lines();
-        let mut values: Vec<Datetime> = Vec::new();
-        let name = match lines.next() {
-            Some(name) => {
-                let name = name.into_diagnostic()?;
-                let parts = name.split(separator).nth(col_number);
-                if let Some(parts) = parts {
-                    parts.to_string()
-                } else {
-                    String::from("Unnamed")
-                }
-            }
-            None => String::from("Unnamed"),
-        };
-        for line in lines {
-            if let Some(val) = line.into_diagnostic()?.split(separator).nth(col_number) {
-                let t: Datetime;
-                if let Some(format) = format {
-                    t = match Datetime::from_str(val, format) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            return Err(miette!(
-                            "Error parsing value `{val}`. String couldn't be converted safely. {e}"
+    fn as_datetime(elements: &[String], name: &str, format: Option<&str>) -> Result<Self, Error> {
+        let mut values = Vec::new();
+        for line in elements {
+            let t: Datetime;
+            if let Some(format) = format {
+                t = match Datetime::from_str(line, format) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return Err(miette!(
+                            "Error parsing value `{line}`. String couldn't be converted safely. {e}"
                         ))
-                        }
-                    };
-                } else {
-                    t = match Datetime::try_guess(val) {
-                        Some(t) => t,
-                        None => {
-                            return Err(miette!(
-                                "Error parsing value `{val}`. String couldn't be converted safely."
-                            ))
-                        }
-                    };
-                }
-                values.push(t);
+                    }
+                };
+            } else {
+                t = match Datetime::try_guess(line) {
+                    Some(t) => t,
+                    None => {
+                        return Err(miette!(
+                            "Error parsing value `{line}`. String couldn't be converted safely."
+                        ))
+                    }
+                };
             }
+            values.push(t);
         }
         Ok(CsvCol {
-            col_name: name,
+            col_name: name.to_string(),
             n_elements: values.len(),
             values,
         })
