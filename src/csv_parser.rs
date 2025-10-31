@@ -232,5 +232,8 @@ impl Csv {
             .map(ColViewer::new)
     }
 
-    statistics! {mean median }
+    statistics! {mean median}
+    pub fn quantile(&self, name: &str, quantile: f64) -> Option<DataValue> {
+        self.get_col(name).unwrap().quantile(quantile)
+    }
 }

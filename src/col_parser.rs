@@ -164,14 +164,18 @@ impl ColType {
     }
     pub(crate) fn quantile(&self, quantile: f64) -> Option<DataValue> {
         match self {
-            ColType::Float(csv_col) => Some(DataValue::Float(csv_col.quantiles(quantile))),
-            ColType::Integer(csv_col) => Some(DataValue::Integer(csv_col.quantiles(quantile))),
+            ColType::Float(csv_col) => Some(csv_col.quantile(quantile)),
+            ColType::Integer(csv_col) => Some(csv_col.quantile(quantile)),
             ColType::Datetime(csv_col) => Some(DataValue::Datetime(csv_col.quantiles(quantile))),
             ColType::String(_) => unreachable!("String doesn't have a median"),
         }
     }
     pub(crate) fn median(&self) -> Option<DataValue> {
-        self.quantile(0.50)
+        match self {
+            ColType::Float(csv_col) => Some(csv_col.median()),
+            ColType::Integer(csv_col) => Some(csv_col.median()),
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -184,19 +188,87 @@ impl<T: PartialOrd + Clone> CsvCol<T> {
     }
 }
 
+impl CsvCol<f64> {
+    fn median(&self) -> DataValue {
+        self.apply((self.n_elements / 2) as u64)
+    }
+    fn apply(&self, index: u64) -> DataValue {
+        if self.n_elements % 2 == 0 && index != 0 {
+            return DataValue::Float(
+                0.5 * _quick_select(&self.values, index - 1, |list| -> usize {
+                    let mut rng = rng();
+                    rng.random_range(0..list.len())
+                }) + 0.5
+                    * _quick_select(&self.values, index, |list| -> usize {
+                        let mut rng = rng();
+                        rng.random_range(0..list.len())
+                    }),
+            );
+        }
+        DataValue::Float(_quick_select(&self.values, index, |list| -> usize {
+            let mut rng = rng();
+            rng.random_range(0..list.len())
+        }))
+    }
+    fn quantile(&self, quantile: f64) -> DataValue {
+        assert!(quantile > 0.0 && quantile < 1.0);
+        let percentage = 1.0 / quantile;
+        // NOTE: Not really the best way to do this, but oh well
+        let number_elements = self.n_elements / percentage as usize;
+        dbg!(percentage);
+        self.apply(number_elements as u64)
+    }
+}
+
+impl CsvCol<i64> {
+    fn apply(&self, index: u64) -> DataValue {
+        if self.n_elements % 2 == 0 && index != 0 {
+            return DataValue::Float(
+                0.5 * _quick_select(&self.values, index - 1, |list| -> usize {
+                    let mut rng = rng();
+                    rng.random_range(0..list.len())
+                }) as f64
+                    + 0.5
+                        * _quick_select(&self.values, index, |list| -> usize {
+                            let mut rng = rng();
+                            rng.random_range(0..list.len())
+                        }) as f64,
+            );
+        }
+        DataValue::Float(_quick_select(
+            &self.values,
+            (self.n_elements / 2) as u64,
+            |list| -> usize {
+                let mut rng = rng();
+                rng.random_range(0..list.len())
+            },
+        ) as f64)
+    }
+    fn median(&self) -> DataValue {
+        self.apply(self.n_elements as u64)
+    }
+    fn quantile(&self, quantile: f64) -> DataValue {
+        assert!(quantile > 0.0 && quantile < 1.0);
+        let percentage = 1.0 / quantile.round();
+        // NOTE: Not really the best way to do this, but oh well
+        let number_elements = self.n_elements * percentage as usize;
+        self.apply(number_elements as u64)
+    }
+}
+
 fn _select_quantile<T: PartialOrd + Clone>(
     list: &[T],
     quantile: f64,
     pivot_selection: fn(&[T]) -> usize,
 ) -> T {
     assert!(quantile > 0.0 && quantile < 1.0);
-    let index = (1.0 / quantile) as usize;
+    let index = (1.0 / quantile) as u64;
     _quick_select(list, index, pivot_selection)
 }
 
 fn _quick_select<T: PartialOrd + Clone>(
     list: &[T],
-    index: usize,
+    index: u64,
     pivot_selection: fn(&[T]) -> usize,
 ) -> T {
     if list.len() == 1 {
@@ -208,12 +280,16 @@ fn _quick_select<T: PartialOrd + Clone>(
     let lows: Vec<_> = list.iter().filter(|&x| x < pivot).cloned().collect();
     let highs: Vec<_> = list.iter().filter(|&x| x > pivot).cloned().collect();
     let pivots: Vec<_> = list.iter().filter(|&x| x == pivot).cloned().collect();
-    if index < lows.len() {
+    if index < lows.len() as u64 {
         return _quick_select(&lows, index, pivot_selection);
-    } else if index < lows.len() + pivots.len() {
+    } else if index < (lows.len() + pivots.len()) as u64 {
         return pivots[0].clone();
     }
-    _quick_select(&highs, index - lows.len() - pivots.len(), pivot_selection)
+    _quick_select(
+        &highs,
+        index - (lows.len() - pivots.len()) as u64,
+        pivot_selection,
+    )
 }
 
 impl<T: Display> CsvCol<T> {
