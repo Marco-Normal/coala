@@ -33,20 +33,35 @@ impl<'a> ColViewer<'a> {
     pub(crate) fn new(col: &'a ColType) -> Self {
         Self { inner: col }
     }
+    pub(crate) fn get_ref(&self) -> &Self {
+        self
+    }
     pub fn name(&self) -> &str {
         self.inner.name()
     }
-    pub fn mean(&self) -> Option<DataValue> {
+    pub fn mean(&self) -> Result<DataValue, Error> {
         self.inner.mean()
     }
-    pub fn get(&self, index: usize) -> Option<DataValue> {
+    pub fn get(&self, index: usize) -> Result<DataValue, Error> {
         self.inner.data_as_value(index)
     }
-    pub fn quantile(&self, quantile: f64) -> Option<DataValue> {
+    pub fn quantile(&self, quantile: f64) -> Result<DataValue, Error> {
         self.inner.quantile(quantile)
     }
-    pub fn median(&self) -> Option<DataValue> {
+    pub fn median(&self) -> Result<DataValue, Error> {
         self.inner.median()
+    }
+    pub fn mean_unchecked(&self) -> DataValue {
+        self.inner.mean().unwrap()
+    }
+    pub fn get_unchecked(&self, index: usize) -> DataValue {
+        self.inner.data_as_value(index).unwrap()
+    }
+    pub fn quantile_unchecked(&self, quantile: f64) -> DataValue {
+        self.inner.quantile(quantile).unwrap()
+    }
+    pub fn median_unchecked(&self) -> DataValue {
+        self.inner.median().unwrap()
     }
 }
 
@@ -85,14 +100,8 @@ macro_rules! statistics {
                 }
 
             let col = self
-            .get_col(name)
-            .ok_or_else(|| ColParserError::MissingCol {
-                name: name.to_string(),
-            })?;
-        let $t = col.$t().ok_or_else(|| ColParserError::InvalidMetric {
-            name: name.to_string(),
-            metric: String::from("$t"),
-        })?;
+            .get_col(name)?;
+        let $t = col.$t()?;
                 self.cache.entry(col.name().to_string()).or_default().$t = Some($t.clone());
                 Ok($t)
             }
@@ -198,9 +207,9 @@ impl Csv {
             }
         }
         result.push('\n');
-        for row_idx in 0..(end - beg) {
+        for row in cols.iter().take(beg - end) {
             for col_idx in 0..self.n_cols {
-                let value = &cols[col_idx][row_idx];
+                let value = &row[col_idx];
                 result.push_str(&format!("{:<width$}", value, width = max_widths[col_idx]));
                 if col_idx < self.n_cols - 1 {
                     result.push_str(", ");
@@ -225,15 +234,21 @@ impl Csv {
         println!("{result}");
         Ok(())
     }
-    pub fn get_col(&self, name: &str) -> Option<ColViewer<'_>> {
+    pub fn get_col(&self, name: &str) -> Result<ColViewer<'_>, Error> {
         self.cols
             .iter()
             .find(|c| c.name() == name)
             .map(ColViewer::new)
+            .ok_or(
+                ColParserError::MissingCol {
+                    name: name.to_string(),
+                }
+                .into(),
+            )
     }
 
     statistics! {mean median}
-    pub fn quantile(&self, name: &str, quantile: f64) -> Option<DataValue> {
-        self.get_col(name).unwrap().quantile(quantile)
+    pub fn quantile(&self, name: &str, quantile: f64) -> Result<DataValue, Error> {
+        self.get_col(name)?.quantile(quantile)
     }
 }

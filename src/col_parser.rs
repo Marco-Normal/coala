@@ -1,21 +1,21 @@
 use datetime::datetime::Datetime;
 use log::info;
-use miette::{miette, Diagnostic, Error, IntoDiagnostic};
-use rand::{prelude::*, rng};
+use miette::{miette, Diagnostic, Error};
 use std::{
+    cell::RefCell,
     fmt::{self, Display},
-    fs::File,
-    io::{BufRead, BufReader},
     str::FromStr,
-    usize,
 };
 use thiserror::Error;
 
+use crate::statistics::{Statistics, StatisticsError};
+
 #[derive(Debug)]
 pub(crate) struct CsvCol<T> {
-    col_name: String,
-    values: Vec<T>,
-    n_elements: usize,
+    pub(crate) col_name: String,
+    pub(crate) values: Vec<T>,
+    pub(crate) n_elements: usize,
+    pub(crate) sorted_values: RefCell<Option<(Vec<T>, usize)>>,
 }
 #[derive(Debug)]
 pub(crate) enum ColType {
@@ -28,6 +28,8 @@ pub(crate) enum ColType {
 enum ColParseError {
     #[error("Error in collumn named `{name}`. Invalid data type, couldn't match with any.")]
     InvalidColType { name: String },
+    #[error("Index out of range for column")]
+    OutOfRange,
 }
 #[derive(Debug, Default)]
 pub(crate) struct ColConfig<'a> {
@@ -76,11 +78,10 @@ impl ColType {
         name: String,
         config: Option<ColConfig>,
     ) -> Result<Self, Error> {
-        if let Some(config) = config {
-            if let Some(col) = Self::as_date(elements, &name, config) {
+        if let Some(config) = config
+           && let Some(col) = Self::as_date(elements, &name, config) {
                 let col = col?;
                 return Ok(Self::Datetime(col));
-            }
         }
         macro_rules! try_type {
             ($t:ty, $p:expr,  $n:expr, $en:ident) => {
@@ -109,7 +110,7 @@ impl ColType {
             ColConfig {
                 date_format,
                 as_date: true,
-            } => Some(CsvCol::as_datetime(elements, name, date_format.as_deref())),
+            } => Some(CsvCol::as_datetime(elements, name, date_format)),
             _ => None,
         }
     }
@@ -133,163 +134,71 @@ impl ColType {
             ColType::Datetime(csv_col) => &csv_col.col_name,
         }
     }
-    pub(crate) fn mean(&self) -> Option<DataValue> {
+
+    pub(crate) fn mean(&self) -> Result<DataValue, Error> {
         match self {
-            Self::Float(col) => {
-                let mean = col.values.iter().sum::<f64>();
-                dbg!(mean);
-                let mean = mean / col.values.len() as f64;
-                Some(DataValue::Float(mean))
+            Self::Float(col) => col.mean(),
+            Self::Integer(col) => col.mean(),
+            col => Err(StatisticsError::InvalidType {
+                col: col.name().to_string(),
             }
-            Self::Integer(col) => {
-                let mean =
-                    col.values.iter().map(|val| *val as f64).sum::<f64>() / col.values.len() as f64;
-                Some(DataValue::Float(mean))
-            }
-            c => unreachable!("Col {c} doesn't have mean implemented"),
+            .into()),
         }
     }
-    pub(crate) fn data_as_value(&self, index: usize) -> Option<DataValue> {
+    pub(crate) fn median(&self) -> Result<DataValue, Error> {
         match self {
-            ColType::Float(csv_col) => csv_col.values.get(index).map(|v| DataValue::Float(*v)),
-            ColType::Integer(csv_col) => csv_col.values.get(index).map(|v| DataValue::Integer(*v)),
+            Self::Float(col) => col.median(),
+            Self::Integer(col) => col.median(),
+            col => Err(StatisticsError::InvalidType {
+                col: col.name().to_string(),
+            }
+            .into()),
+        }
+    }
+    pub(crate) fn quantile(&self, quantile: f64) -> Result<DataValue, Error> {
+        match self {
+            Self::Float(col) => col.quantile(quantile),
+            Self::Integer(col) => col.quantile(quantile),
+            col => Err(StatisticsError::InvalidType {
+                col: col.name().to_string(),
+            }
+            .into()),
+        }
+    }
+    pub(crate) fn stddev(&self) -> Result<DataValue, Error> {
+        match self {
+            Self::Float(col) => col.stddev(),
+            Self::Integer(col) => col.stddev(),
+            col => Err(StatisticsError::InvalidType {
+                col: col.name().to_string(),
+            }
+            .into()),
+        }
+    }
+    pub(crate) fn data_as_value(&self, index: usize) -> Result<DataValue, Error> {
+        match self {
+            ColType::Float(csv_col) => csv_col
+                .values
+                .get(index)
+                .map(|f| DataValue::Float(*f))
+                .ok_or(ColParseError::OutOfRange.into()),
+            ColType::Integer(csv_col) => csv_col
+                .values
+                .get(index)
+                .map(|f| DataValue::Integer(*f))
+                .ok_or(ColParseError::OutOfRange.into()),
             ColType::String(csv_col) => csv_col
                 .values
                 .get(index)
-                .map(|v| DataValue::String(v.clone())),
-            ColType::Datetime(csv_col) => {
-                csv_col.values.get(index).map(|v| DataValue::Datetime(*v))
-            }
+                .map(|f| DataValue::String(f.clone()))
+                .ok_or(ColParseError::OutOfRange.into()),
+            ColType::Datetime(csv_col) => csv_col
+                .values
+                .get(index)
+                .map(|f| DataValue::DateTime(*f))
+                .ok_or(ColParseError::OutOfRange.into()),
         }
     }
-    pub(crate) fn quantile(&self, quantile: f64) -> Option<DataValue> {
-        match self {
-            ColType::Float(csv_col) => Some(csv_col.quantile(quantile)),
-            ColType::Integer(csv_col) => Some(csv_col.quantile(quantile)),
-            ColType::Datetime(csv_col) => Some(DataValue::Datetime(csv_col.quantiles(quantile))),
-            ColType::String(_) => unreachable!("String doesn't have a median"),
-        }
-    }
-    pub(crate) fn median(&self) -> Option<DataValue> {
-        match self {
-            ColType::Float(csv_col) => Some(csv_col.median()),
-            ColType::Integer(csv_col) => Some(csv_col.median()),
-            _ => unreachable!(),
-        }
-    }
-}
-
-impl<T: PartialOrd + Clone> CsvCol<T> {
-    fn quantiles(&self, quantile: f64) -> T {
-        _select_quantile(&self.values, quantile, |list| -> usize {
-            let mut rng = rng();
-            rng.random_range(0..list.len())
-        })
-    }
-}
-
-impl CsvCol<f64> {
-    fn median(&self) -> DataValue {
-        self.apply((self.n_elements / 2) as u64)
-    }
-    fn apply(&self, index: u64) -> DataValue {
-        if self.n_elements % 2 == 0 && index != 0 {
-            return DataValue::Float(
-                0.5 * _quick_select(&self.values, index - 1, |list| -> usize {
-                    let mut rng = rng();
-                    rng.random_range(0..list.len())
-                }) + 0.5
-                    * _quick_select(&self.values, index, |list| -> usize {
-                        let mut rng = rng();
-                        rng.random_range(0..list.len())
-                    }),
-            );
-        }
-        DataValue::Float(_quick_select(&self.values, index, |list| -> usize {
-            let mut rng = rng();
-            rng.random_range(0..list.len())
-        }))
-    }
-    fn quantile(&self, quantile: f64) -> DataValue {
-        assert!(quantile > 0.0 && quantile < 1.0);
-        let percentage = 1.0 / quantile;
-        // NOTE: Not really the best way to do this, but oh well
-        let number_elements = self.n_elements / percentage as usize;
-        dbg!(percentage);
-        self.apply(number_elements as u64)
-    }
-}
-
-impl CsvCol<i64> {
-    fn apply(&self, index: u64) -> DataValue {
-        if self.n_elements % 2 == 0 && index != 0 {
-            return DataValue::Float(
-                0.5 * _quick_select(&self.values, index - 1, |list| -> usize {
-                    let mut rng = rng();
-                    rng.random_range(0..list.len())
-                }) as f64
-                    + 0.5
-                        * _quick_select(&self.values, index, |list| -> usize {
-                            let mut rng = rng();
-                            rng.random_range(0..list.len())
-                        }) as f64,
-            );
-        }
-        DataValue::Float(_quick_select(
-            &self.values,
-            (self.n_elements / 2) as u64,
-            |list| -> usize {
-                let mut rng = rng();
-                rng.random_range(0..list.len())
-            },
-        ) as f64)
-    }
-    fn median(&self) -> DataValue {
-        self.apply(self.n_elements as u64)
-    }
-    fn quantile(&self, quantile: f64) -> DataValue {
-        assert!(quantile > 0.0 && quantile < 1.0);
-        let percentage = 1.0 / quantile.round();
-        // NOTE: Not really the best way to do this, but oh well
-        let number_elements = self.n_elements * percentage as usize;
-        self.apply(number_elements as u64)
-    }
-}
-
-fn _select_quantile<T: PartialOrd + Clone>(
-    list: &[T],
-    quantile: f64,
-    pivot_selection: fn(&[T]) -> usize,
-) -> T {
-    assert!(quantile > 0.0 && quantile < 1.0);
-    let index = (1.0 / quantile) as u64;
-    _quick_select(list, index, pivot_selection)
-}
-
-fn _quick_select<T: PartialOrd + Clone>(
-    list: &[T],
-    index: u64,
-    pivot_selection: fn(&[T]) -> usize,
-) -> T {
-    if list.len() == 1 {
-        assert_eq!(index, 0);
-        return list[0].clone();
-    }
-    let pivot = pivot_selection(list);
-    let pivot = &list[pivot];
-    let lows: Vec<_> = list.iter().filter(|&x| x < pivot).cloned().collect();
-    let highs: Vec<_> = list.iter().filter(|&x| x > pivot).cloned().collect();
-    let pivots: Vec<_> = list.iter().filter(|&x| x == pivot).cloned().collect();
-    if index < lows.len() as u64 {
-        return _quick_select(&lows, index, pivot_selection);
-    } else if index < (lows.len() + pivots.len()) as u64 {
-        return pivots[0].clone();
-    }
-    _quick_select(
-        &highs,
-        index - (lows.len() - pivots.len()) as u64,
-        pivot_selection,
-    )
 }
 
 impl<T: Display> CsvCol<T> {
@@ -328,7 +237,36 @@ impl<T: FromStr> CsvCol<T> {
             col_name: name.to_string(),
             n_elements: values.len(),
             values,
+            sorted_values: RefCell::default(),
         })
+    }
+}
+
+// impl CsvCol<f64> {
+//     fn get_sorted(&self) -> Vec<f64> {
+//         if let Some((cached, len)) = &*self.sorted_values.borrow() {
+//             if *len == self.n_elements {
+//                 return cached.clone();
+//             }
+//         }
+//         let mut sorted = self.values.clone();
+//         sorted.sort_unstable_by(|a, b| a.total_cmp(b));
+//         *self.sorted_values.borrow_mut() = Some((sorted.clone(), sorted.len()));
+//         sorted
+//     }
+// }
+
+impl<T: PartialOrd + Clone> CsvCol<T> {
+    pub(crate) fn get_sorted(&self) -> Vec<T> {
+        if let Some((cached, len)) = &*self.sorted_values.borrow() 
+            && *len == self.n_elements {
+                return cached.clone();
+            }
+        
+        let mut sorted = self.values.clone();
+        sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        *self.sorted_values.borrow_mut() = Some((sorted.clone(), sorted.len()));
+        sorted
     }
 }
 
@@ -362,6 +300,7 @@ impl CsvCol<Datetime> {
             col_name: name.to_string(),
             n_elements: values.len(),
             values,
+            sorted_values: RefCell::default(),
         })
     }
 }
@@ -370,7 +309,8 @@ impl CsvCol<Datetime> {
 pub enum DataValue {
     Float(f64),
     Integer(i64),
+    Unsigned(u64),
     String(String),
-    Datetime(Datetime),
+    DateTime(Datetime),
     Null,
 }
